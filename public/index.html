@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>闪传 | Flashdrop</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Ccircle cx='256' cy='256' r='256' fill='%232563eb'/%3E%3Cpath fill='%23ffffff' transform='translate(100, 100) scale(0.6)' d='M498.1 5.6c10.1 7 15.4 19.1 13.5 31.2l-64 416c-1.5 9.7-7.4 18.2-16 23s-18.9 5.4-28 1.6L284 427.7l-68.5 74.1c-8.9 9.7-22.9 12.9-35.2 8.1S160 493.2 160 480V396.4c0-4 1.5-7.8 4.2-10.7L331.8 202.8c5.8-6.3 5.6-16-.4-22s-15.7-6.4-22-.7L106 360.8 17.7 316.6C7.1 311.3 .3 300.7 0 288.9s5.9-22.8 16.1-28.7l448-256c10.7-6.1 23.9-5.5 34 1.4z'/%3E%3C/svg%3E" />
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.staticfile.net/font-awesome/6.4.0/css/all.min.css">
+    <script crossorigin src="https://cdn.staticfile.net/react/18.2.0/umd/react.production.min.js"></script>
+    <script crossorigin src="https://cdn.staticfile.net/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.staticfile.net/babel-standalone/7.21.3/babel.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: #f8fafc;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes scaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            20% { transform: translateX(-8px); }
+            40% { transform: translateX(8px); }
+            60% { transform: translateX(-4px); }
+            80% { transform: translateX(4px); }
+        }
+
+        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+        .animate-slide-up { animation: slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .animate-scale-in { animation: scaleIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .animate-shake { animation: shake 0.4s ease-in-out forwards; }
+
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        .glass-card {
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 10px 40px -10px rgba(0,0,0,0.05);
+        }
+    </style>
+</head>
+<body class="text-slate-800 min-h-screen flex items-center justify-center p-4 relative">
+    
+    <!-- 骨架屏：在编译引擎加载时拒绝白屏 -->
+    <div id="startup-loader" class="fixed inset-0 bg-[#f8fafc] z-50 flex items-center justify-center transition-opacity duration-500 pointer-events-none">
+        <div class="relative w-full max-w-md h-[650px] max-h-[90vh] glass-card rounded-[2rem] flex flex-col items-center justify-center mx-4 shadow-xl shadow-blue-900/5">
+            <i class="fa-solid fa-circle-notch fa-spin text-4xl text-blue-500 mb-5"></i>
+            <p class="text-slate-500 font-medium text-sm animate-pulse tracking-wide">系统环境加载中</p>
+        </div>
+    </div>
+
+    <div id="root" class="w-full max-w-md w-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        const API_BASE = '/api';
+
+        const formatBytes = (bytes) => {
+            if (bytes === 0) return '0 B';
+            const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        };
+
+        const formatSpeed = (bytesPerSec) => {
+            if (bytesPerSec === 0 || !isFinite(bytesPerSec)) return '0 B/s';
+            const k = 1024, sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+            const i = Math.floor(Math.log(bytesPerSec) / Math.log(k));
+            return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        };
+
+        const App = () => {
+            const [view, setView] = useState('home');
+            const [generatedCodes, setGeneratedCodes] = useState([]);
+            const [retentionDisplay, setRetentionDisplay] = useState('10 小时');
+            const [downloadData, setDownloadData] = useState(null);
+
+            // React接管后平滑移除骨架屏
+            useEffect(() => {
+                const loader = document.getElementById('startup-loader');
+                if (loader) {
+                    loader.style.opacity = '0';
+                    setTimeout(() => loader.remove(), 500);
+                }
+            }, []);
+
+            return (
+                <>
+                    <div className="relative w-full h-[650px] max-h-[90vh] glass-card rounded-[2rem] overflow-hidden flex flex-col shadow-2xl shadow-blue-900/5">
+                        
+                        <div className={`absolute top-0 left-0 right-0 h-[72px] flex items-center justify-between px-6 z-20 bg-white/90 backdrop-blur-md border-b border-slate-100/50 transition-opacity duration-300 ${view === 'home' ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
+                            <div className="flex items-center gap-3">
+                                <div className="flex items-center justify-center rounded-full bg-blue-600 text-white shadow-lg shadow-blue-500/30 w-8 h-8 text-[14px]">
+                                    <i className="fa-solid fa-paper-plane"></i>
+                                </div>
+                                <span className="font-bold tracking-tight text-slate-800 text-lg">闪传</span>
+                            </div>
+                            <button onClick={() => setView('home')} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 transition-colors text-slate-500">
+                                <i className="fa-solid fa-xmark text-lg"></i>
+                            </button>
+                        </div>
+
+                        <div className="flex-1 relative z-0 flex flex-col">
+                            {view === 'home' && <HomeView setView={setView} />}
+                            {view === 'send' && <SendView setView={setView} setGeneratedCodes={setGeneratedCodes} setRetentionDisplay={setRetentionDisplay} />}
+                            {view === 'code' && <CodeView codes={generatedCodes} retentionText={retentionDisplay} />}
+                            {view === 'receive' && <ReceiveView setView={setView} setDownloadData={setDownloadData} />}
+                            {view === 'confirm' && <ConfirmView setView={setView} data={downloadData} />}
+                        </div>
+                    </div>
+                    
+                    <div className="text-center text-slate-400/80 text-xs mt-6 font-medium tracking-wide">
+                        2022~2026 ©HaoyuHuang All rights reserved.
+                    </div>
+                </>
+            );
+        };
+
+        const HomeView = ({ setView }) => (
+            <div className="absolute inset-0 overflow-y-auto no-scrollbar p-6 flex flex-col animate-fade-in">
+                <div className="my-auto w-full py-6">
+                    <div className="flex flex-col items-center mb-10 shrink-0">
+                        <div className="flex items-center justify-center rounded-full bg-blue-600 text-white shadow-lg shadow-blue-500/30 w-[84px] h-[84px] text-[34px] mb-5">
+                            <i className="fa-solid fa-paper-plane"></i>
+                        </div>
+                        <h1 className="text-[28px] font-bold text-slate-800 tracking-tight mb-4">闪传</h1>
+                        <p className="text-slate-800 font-bold text-lg">简单、快速的文件传输</p>
+                        <p className="text-slate-500 text-sm mt-1.5">无需登录，即用即走</p>
+                    </div>
+                    
+                    <div className="flex flex-col gap-4 w-full shrink-0">
+                        <button onClick={() => setView('send')} className="group relative w-full p-6 bg-white border-2 border-slate-100 rounded-3xl hover:border-blue-500 hover:shadow-xl hover:shadow-blue-500/10 transition-all duration-300 flex items-center gap-5 text-left active:scale-[0.98]">
+                            <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:scale-110 group-hover:bg-blue-600 group-hover:text-white transition-all duration-300 shrink-0">
+                                <i className="fa-solid fa-upload text-xl"></i>
+                            </div>
+                            <div>
+                                <h2 className="text-lg font-bold text-slate-800">发送</h2>
+                                <p className="text-slate-500 text-sm mt-0.5">上传文件或文字获取取件码</p>
+                            </div>
+                        </button>
+
+                        <button onClick={() => setView('receive')} className="group relative w-full p-6 bg-white border-2 border-slate-100 rounded-3xl hover:border-emerald-500 hover:shadow-xl hover:shadow-emerald-500/10 transition-all duration-300 flex items-center gap-5 text-left active:scale-[0.98]">
+                            <div className="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center group-hover:scale-110 group-hover:bg-emerald-600 group-hover:text-white transition-all duration-300 shrink-0">
+                                <i className="fa-solid fa-download text-xl"></i>
+                            </div>
+                            <div>
+                                <h2 className="text-lg font-bold text-slate-800">接收</h2>
+                                <p className="text-slate-500 text-sm mt-0.5">输入取件码即可获取</p>
+                            </div>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const SendView = ({ setView, setGeneratedCodes, setRetentionDisplay }) => {
+            const [files, setFiles] = useState([]);
+            const [message, setMessage] = useState('');
+            
+            const timeOptions = [
+                { label: '1 小时', value: '1h' },
+                { label: '10 小时', value: '10h' },
+                { label: '1 天', value: '1d' },
+                { label: '3 天', value: '3d' },
+                { label: '7 天', value: '7d' }
+            ];
+            const [timeIndex, setTimeIndex] = useState(1); // 默认10小时
+            const [quantity, setQuantity] = useState(1);
+
+            const [isDragging, setIsDragging] = useState(false);
+            const [isUploading, setIsUploading] = useState(false);
+            const [uploadProgress, setUploadProgress] = useState(0);
+            const [uploadSpeed, setUploadSpeed] = useState('');
+            const [errorMessage, setErrorMessage] = useState('');
+            const fileInputRef = useRef(null);
+
+            const handleFileChange = (e) => {
+                setErrorMessage('');
+                if (e.target.files?.length > 0) setFiles([...files, ...Array.from(e.target.files)]);
+            };
+
+            const removeFile = (index) => setFiles(files.filter((_, i) => i !== index));
+
+            const handleSubmit = () => {
+                if (files.length === 0 && !message.trim()) return;
+                setIsUploading(true);
+                setUploadProgress(0);
+                setUploadSpeed('0 B/s');
+                setErrorMessage('');
+                
+                const formData = new FormData();
+                files.forEach(f => formData.append('files', f));
+                formData.append('message', message.trim());
+                formData.append('retention', timeOptions[timeIndex].value);
+                formData.append('quantity', quantity);
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `${API_BASE}/upload`, true);
+
+                let lastLoaded = 0;
+                let lastTime = Date.now();
+
+                xhr.upload.onprogress = (event) => {
+                    if (event.lengthComputable) {
+                        const percentComplete = Math.floor((event.loaded / event.total) * 100);
+                        setUploadProgress(percentComplete);
+
+                        const currentTime = Date.now();
+                        const timeDiff = (currentTime - lastTime) / 1000;
+                        if (timeDiff >= 0.5) {
+                            const speed = (event.loaded - lastLoaded) / timeDiff;
+                            setUploadSpeed(formatSpeed(speed));
+                            lastLoaded = event.loaded;
+                            lastTime = currentTime;
+                        }
+                    }
+                };
+
+                xhr.onload = () => {
+                    setIsUploading(false);
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            const data = JSON.parse(xhr.responseText);
+                            setGeneratedCodes(data.codes);
+                            setRetentionDisplay(timeOptions[timeIndex].label);
+                            setView('code');
+                        } catch (error) {
+                            setErrorMessage('服务器响应异常');
+                        }
+                    } else {
+                        try {
+                            const data = JSON.parse(xhr.responseText);
+                            setErrorMessage(data.error || '上传失败，请重试');
+                        } catch (e) {
+                            if(xhr.status === 413) setErrorMessage('上传失败：文件大小超出 5GB 限制');
+                            else setErrorMessage(`上传失败 (状态码: ${xhr.status})`);
+                        }
+                    }
+                };
+
+                xhr.onerror = () => {
+                    setIsUploading(false);
+                    setErrorMessage('网络异常，请检查连接');
+                };
+
+                xhr.send(formData);
+            };
+
+            const currentTotalSize = files.reduce((acc, f) => acc + f.size, 0);
+
+            return (
+                <div className="absolute inset-0 flex flex-col animate-slide-up">
+                    <div className="flex-1 overflow-y-auto no-scrollbar px-6 pb-24 pt-[88px] flex flex-col gap-4">
+                        
+                        <div className="shrink-0 mt-2">
+                            <textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="输入要分享的文字内容（支持纯文本分享）" className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all resize-none h-24"></textarea>
+                        </div>
+
+                        {/* 完美精美步进器组件 */}
+                        <div className="flex gap-4 shrink-0 px-1 mt-1">
+                            <div className="flex flex-col gap-1.5 flex-1">
+                                <label className="text-[11px] text-slate-400 font-bold uppercase tracking-wider text-center">保存时间</label>
+                                <div className="flex items-center justify-between border border-slate-200 shadow-sm rounded-xl overflow-hidden bg-white h-11 transition-all hover:border-blue-300">
+                                    <button onClick={() => setTimeIndex(Math.max(0, timeIndex - 1))} disabled={timeIndex === 0} className="w-[42px] h-full flex items-center justify-center text-slate-500 hover:bg-slate-50 disabled:opacity-30 border-r border-slate-100 transition-colors"><i className="fa-solid fa-minus text-xs"></i></button>
+                                    <span className="flex-1 text-center font-bold text-slate-700 text-sm select-none">{timeOptions[timeIndex].label}</span>
+                                    <button onClick={() => setTimeIndex(Math.min(timeOptions.length - 1, timeIndex + 1))} disabled={timeIndex === timeOptions.length - 1} className="w-[42px] h-full flex items-center justify-center text-slate-500 hover:bg-slate-50 disabled:opacity-30 border-l border-slate-100 transition-colors"><i className="fa-solid fa-plus text-xs"></i></button>
+                                </div>
+                            </div>
+                            <div className="flex flex-col gap-1.5 flex-1">
+                                <label className="text-[11px] text-slate-400 font-bold uppercase tracking-wider text-center">生成数量</label>
+                                <div className="flex items-center justify-between border border-slate-200 shadow-sm rounded-xl overflow-hidden bg-white h-11 transition-all hover:border-blue-300">
+                                    <button onClick={() => setQuantity(Math.max(1, quantity - 1))} disabled={quantity === 1} className="w-[42px] h-full flex items-center justify-center text-slate-500 hover:bg-slate-50 disabled:opacity-30 border-r border-slate-100 transition-colors"><i className="fa-solid fa-minus text-xs"></i></button>
+                                    <span className="flex-1 text-center font-bold text-slate-700 text-sm select-none">{quantity} 个</span>
+                                    <button onClick={() => setQuantity(Math.min(5, quantity + 1))} disabled={quantity === 5} className="w-[42px] h-full flex items-center justify-center text-slate-500 hover:bg-slate-50 disabled:opacity-30 border-l border-slate-100 transition-colors"><i className="fa-solid fa-plus text-xs"></i></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className={`border-2 border-dashed rounded-2xl p-5 flex flex-col items-center justify-center text-center transition-all cursor-pointer shrink-0 mt-2 ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-slate-50/50 hover:bg-slate-50'}`}
+                            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                            onDragLeave={() => setIsDragging(false)}
+                            onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleFileChange({target: {files: e.dataTransfer.files}}); }}
+                            onClick={() => fileInputRef.current?.click()}
+                        >
+                            <input type="file" multiple className="hidden" ref={fileInputRef} onChange={handleFileChange} />
+                            <div className="w-10 h-10 bg-white rounded-full shadow-sm flex items-center justify-center text-blue-500 mb-2">
+                                <i className="fa-solid fa-plus text-lg font-bold"></i>
+                            </div>
+                            <p className="font-medium text-sm text-slate-700">点击或拖拽添加文件</p>
+                        </div>
+
+                        {errorMessage && (
+                            <div className="bg-red-50 text-red-500 text-sm px-4 py-3 rounded-xl flex items-center gap-2 animate-fade-in shrink-0">
+                                <i className="fa-solid fa-circle-exclamation text-lg"></i> {errorMessage}
+                            </div>
+                        )}
+
+                        {files.length > 0 && (
+                            <div className="bg-white rounded-2xl border border-slate-100 p-2 shadow-sm shrink-0 mb-4">
+                                <div className="px-2 pt-2 pb-1 text-xs font-bold text-slate-400 flex justify-between">
+                                    <span>已选文件 ({files.length})</span>
+                                    <span>{formatBytes(currentTotalSize)}</span>
+                                </div>
+                                {files.map((file, idx) => (
+                                    <div key={idx} className="flex items-center justify-between p-3 hover:bg-slate-50 rounded-xl transition-colors group">
+                                        <div className="flex items-center gap-3 overflow-hidden">
+                                            <i className="fa-solid fa-file-lines text-xl text-slate-400"></i>
+                                            <div className="truncate">
+                                                <p className="text-sm font-medium text-slate-700 truncate">{file.name}</p>
+                                                <p className="text-xs text-slate-400">{formatBytes(file.size)}</p>
+                                            </div>
+                                        </div>
+                                        <button onClick={(e) => { e.stopPropagation(); removeFile(idx); }} className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors">
+                                            <i className="fa-solid fa-trash"></i>
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-white via-white/90 to-transparent pointer-events-none">
+                        <button onClick={handleSubmit} disabled={files.length === 0 && !message.trim() || isUploading}
+                            className={`pointer-events-auto relative overflow-hidden w-full py-4 rounded-2xl font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2 ${files.length === 0 && !message.trim() ? 'bg-slate-300 cursor-not-allowed shadow-none' : 'bg-blue-600 hover:bg-blue-700 hover:shadow-blue-600/30 active:scale-[0.98]'}`}>
+                            {isUploading ? (
+                                <>
+                                    <div className="absolute left-0 top-0 bottom-0 bg-white/20 transition-all duration-300 ease-out" style={{ width: `${uploadProgress}%` }}></div>
+                                    <span className="relative z-10 flex items-center gap-2">
+                                        <i className="fa-solid fa-circle-notch fa-spin text-xl"></i>
+                                        <span>上传中 {uploadProgress}%</span>
+                                        <span className="text-xs font-normal opacity-90 ml-1">({uploadSpeed})</span>
+                                    </span>
+                                </>
+                            ) : (
+                                <>获取取件码 <i className="fa-solid fa-arrow-right font-bold"></i></>
+                            )}
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        const CodeView = ({ codes, retentionText }) => {
+            // 【核心排版算法】通过控制容器的最大宽度，强制卡片换行并居中
+            const getContainerClass = (len) => {
+                if (len === 1) return "flex justify-center w-full";
+                if (len === 2) return "flex justify-center gap-4 w-full";
+                if (len === 3) return "flex justify-center gap-3 w-full"; // 1行3个
+                if (len === 4) return "flex flex-wrap justify-center gap-4 w-full max-w-[260px]"; // 拦截宽度，强制变为 2行2列
+                if (len === 5) return "flex flex-wrap justify-center gap-3 w-full max-w-[320px]"; // 拦截宽度，强制变为 上3下2
+                return "flex flex-wrap justify-center gap-3 w-full";
+            };
+
+            // 【动态卡片尺寸】数量越多，卡片越精致，极大地节省纵向高度
+            const getCardStyle = (len) => {
+                if (len === 1) return "w-[90px] h-[80px] text-[2.5rem] rounded-2xl shadow-sm";
+                if (len === 2) return "w-[90px] h-[80px] text-[2.5rem] rounded-2xl shadow-md";
+                if (len === 3) return "w-[90px] h-[80px] text-[2.5rem] rounded-2xl shadow-sm";
+                if (len === 4) return "w-[90px] h-[80px] text-[2.5rem] rounded-2xl shadow-md";
+                if (len === 5) return "w-[90px] h-[80px] text-[2.5rem] rounded-2xl shadow-sm"; 
+                return "";
+            };
+
+            return (
+                <div className="absolute inset-0 overflow-y-auto no-scrollbar px-6 pb-6 pt-[72px] flex flex-col items-center animate-fade-in text-center">
+                    <div className="flex-1 w-full flex flex-col items-center justify-center">
+                        
+                        {/* 顶部的绿色对勾图标 */}
+                        <div className="w-20 h-20 bg-green-50 text-green-500 rounded-full flex items-center justify-center mb-6">
+                            <i className="fa-solid fa-circle-check text-4xl"></i>
+                        </div>
+
+                        <h2 className="text-slate-800 font-bold text-xl mb-1">上传成功</h2>
+                        <p className="text-slate-500 text-sm mb-6">请妥善保存您的取件码</p>
+                        
+                        {/* 动态网格矩阵 */}
+                        <div className={`${getContainerClass(codes.length)} mb-8`}>
+                            {codes.map((code, idx) => (
+                                <div key={idx} 
+                                     className={`relative bg-gradient-to-b from-white to-slate-50 border border-slate-200/80 flex items-center justify-center font-bold text-slate-800 font-mono tracking-widest transition-all hover:border-blue-400 hover:-translate-y-0.5 hover:shadow-md ${getCardStyle(codes.length)}`}>
+                                    <span className="relative z-10 drop-shadow-sm">{code}</span>
+                                    <div className="absolute inset-0 rounded-[inherit] ring-1 ring-inset ring-white/60 pointer-events-none"></div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* 底部时间提示 */}
+                        <div className="bg-slate-50 px-5 py-4 rounded-2xl border border-slate-100 flex flex-col items-center justify-center gap-1 w-full max-w-[280px] shrink-0 text-center">
+                            <p className="text-[13px] text-slate-600 font-medium flex items-center gap-1.5">
+                                <i className="fa-regular fa-clock text-blue-500 text-sm"></i>
+                                此码 <span className="font-bold text-blue-600">{retentionText}</span> 内有效
+                            </p>
+                            {codes.length > 1 && <p className="text-[12px] text-slate-400 mt-1">每个取件码仅供一次性提取</p>}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ReceiveView = ({ setView, setDownloadData }) => {
+            const [displayInput, setDisplayInput] = useState('');
+            const [error, setError] = useState(false);
+            const [isChecking, setIsChecking] = useState(false);
+
+            const handlePress = useCallback((key) => {
+                if (isChecking) return;
+                if (error) setError(false);
+                setDisplayInput(prev => {
+                    if (key === 'delete') return prev.slice(0, -1);
+                    if (key === 'clear') return '';
+                    if (prev.length < 2) return prev + key;
+                    return prev;
+                });
+            }, [isChecking, error]);
+
+            // 输入到两位立刻执行校验
+            useEffect(() => {
+                if (displayInput.length === 2 && !error && !isChecking) {
+                    verifyCode(displayInput);
+                }
+            }, [displayInput, error, isChecking]);
+
+            // 【核心功能：全局实体键盘输入响应】
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    // 防止焦点在可能的输入框里时乱拦截
+                    if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
+                    if (isChecking) return;
+
+                    if (/^[0-9]$/.test(e.key)) {
+                        handlePress(e.key);
+                    } else if (e.key === 'Backspace') {
+                        handlePress('delete');
+                    } else if (e.key === 'Escape') {
+                        handlePress('clear');
+                    }
+                };
+
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [handlePress, isChecking]);
+
+            const verifyCode = async (code) => {
+                setIsChecking(true);
+                try {
+                    const response = await fetch(`${API_BASE}/verify`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ code })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        const processedData = {
+                            ...data,
+                            files: data.files.map((f, i) => ({
+                                ...f,
+                                url: `${API_BASE}/download/${data.token}/${i}`
+                            }))
+                        };
+                        
+                        setDownloadData(processedData);
+                        setView('confirm');
+                    } else {
+                        throw new Error('无效的取件码');
+                    }
+                } catch (e) {
+                    setError(true);
+                    setTimeout(() => { setDisplayInput(''); setError(false); }, 800);
+                } finally {
+                    setIsChecking(false);
+                }
+            };
+
+            return (
+                <div className="absolute inset-0 px-6 pb-6 pt-[88px] flex flex-col animate-slide-up">
+                    <div className="flex-1 flex flex-col items-center justify-center min-h-[400px]">
+                        <h2 className="text-lg font-medium text-slate-600 mb-8 flex items-center gap-2">
+                            {isChecking ? <><i className="fa-solid fa-circle-notch fa-spin"></i> 检索中...</> : "请输入取件码"}
+                        </h2>
+                        
+                        <div className="flex gap-4 mb-12 relative">
+                            <div className={`w-20 h-24 rounded-2xl flex items-center justify-center text-5xl font-bold font-mono transition-all duration-200 ${displayInput.length >= 1 && !error ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30' : error ? 'bg-red-50 border-2 border-red-400 text-red-500' : 'bg-slate-100 text-slate-300'} ${error ? 'animate-shake' : ''}`}>{displayInput[0] || '-'}</div>
+                            <div className={`w-20 h-24 rounded-2xl flex items-center justify-center text-5xl font-bold font-mono transition-all duration-200 ${displayInput.length >= 2 && !error ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30' : error ? 'bg-red-50 border-2 border-red-400 text-red-500' : 'bg-slate-100 text-slate-300'} ${error ? 'animate-shake' : ''}`}>{displayInput[1] || '-'}</div>
+                            
+                            <div className={`absolute -bottom-8 left-0 right-0 text-center transition-all duration-300 pointer-events-none ${error ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`}>
+                                <p className="text-red-500 text-sm font-medium tracking-wide">取件码错误或已失效</p>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-3 w-full max-w-[280px]">
+                            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+                                <button key={num} onClick={() => handlePress(num.toString())} className="h-16 rounded-2xl bg-white border border-slate-100 text-2xl font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100 active:scale-95 transition-all shadow-sm">{num}</button>
+                            ))}
+                            <button onClick={() => handlePress('clear')} className="h-16 rounded-2xl bg-slate-50 text-slate-500 hover:bg-slate-100 active:scale-95 transition-all text-sm font-medium">清空</button>
+                            <button onClick={() => handlePress('0')} className="h-16 rounded-2xl bg-white border border-slate-100 text-2xl font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100 active:scale-95 transition-all shadow-sm">0</button>
+                            <button onClick={() => handlePress('delete')} className="h-16 rounded-2xl bg-slate-50 text-slate-500 hover:bg-slate-100 active:scale-95 transition-all flex items-center justify-center"><i className="fa-solid fa-delete-left text-2xl"></i></button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ConfirmView = ({ setView, data }) => {
+            const [copied, setCopied] = useState(false);
+            const destroyTriggered = useRef(false);
+            const autoTriggered = useRef(false);
+
+            const [downloadingIdx, setDownloadingIdx] = useState(-1);
+            const [downloadProgress, setDownloadProgress] = useState(0);
+            const [downloadSpeed, setDownloadSpeed] = useState('');
+
+            if (!data) return null;
+
+            useEffect(() => {
+                const triggerDestroy = () => {
+                    if (!destroyTriggered.current && data && data.token) {
+                        destroyTriggered.current = true;
+                        const blob = new Blob([JSON.stringify({ token: data.token })], { type: 'application/json' });
+                        navigator.sendBeacon(`${API_BASE}/destroy`, blob);
+                    }
+                };
+                window.addEventListener('beforeunload', triggerDestroy);
+                return () => {
+                    window.removeEventListener('beforeunload', triggerDestroy);
+                    triggerDestroy(); 
+                };
+            }, [data]);
+
+            // 单文件静默自动下载
+            useEffect(() => {
+                if (data && data.files && data.files.length === 1 && !data.message && !autoTriggered.current) {
+                    autoTriggered.current = true;
+                    setTimeout(() => handleDownload(0), 400);
+                }
+            }, [data]);
+
+            const handleCopyText = () => {
+                const textArea = document.createElement("textarea");
+                textArea.value = data.message;
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 2000);
+                } catch (err) {}
+                document.body.removeChild(textArea);
+            };
+
+            const handleDownload = (index) => {
+                if (downloadingIdx !== -1) return Promise.resolve(); 
+                
+                return new Promise((resolve) => {
+                    const file = data.files[index];
+                    setDownloadingIdx(index);
+                    setDownloadProgress(0);
+                    setDownloadSpeed('0 B/s');
+
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', file.url, true);
+                    xhr.responseType = 'blob';
+
+                    let lastLoaded = 0;
+                    let lastTime = Date.now();
+
+                    xhr.onprogress = (event) => {
+                        if (event.lengthComputable) {
+                            setDownloadProgress(Math.floor((event.loaded / event.total) * 100));
+                            const currentTime = Date.now();
+                            const timeDiff = (currentTime - lastTime) / 1000;
+                            if (timeDiff >= 0.5) {
+                                setDownloadSpeed(formatSpeed((event.loaded - lastLoaded) / timeDiff));
+                                lastLoaded = event.loaded;
+                                lastTime = currentTime;
+                            }
+                        }
+                    };
+
+                    xhr.onload = () => {
+                        if (xhr.status === 200) {
+                            const objectUrl = window.URL.createObjectURL(xhr.response);
+                            const a = document.createElement('a');
+                            a.href = objectUrl;
+                            a.download = file.name || 'download';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            setTimeout(() => window.URL.revokeObjectURL(objectUrl), 2000);
+                        } else {
+                            alert('下载失败：文件可能已被销毁或中断');
+                        }
+                        setDownloadingIdx(-1);
+                        resolve();
+                    };
+
+                    xhr.onerror = () => {
+                        alert('网络异常');
+                        setDownloadingIdx(-1);
+                        resolve();
+                    };
+
+                    xhr.send();
+                });
+            };
+
+            const handleDownloadAll = async () => {
+                if (!data.files || downloadingIdx !== -1) return;
+                for (let i = 0; i < data.files.length; i++) {
+                    await handleDownload(i);
+                    await new Promise(r => setTimeout(r, 500)); 
+                }
+            };
+
+            return (
+                <div className="absolute inset-0 flex flex-col animate-slide-up">
+                    <div className="flex-1 overflow-y-auto no-scrollbar px-6 pb-24 pt-[88px] flex flex-col gap-6">
+                        <h2 className="text-xl font-bold flex items-center gap-2 shrink-0">
+                            <i className="fa-solid fa-circle-check text-green-500 text-2xl"></i> 提取成功
+                        </h2>
+
+                        {data.message && (
+                            <div className="shrink-0 relative group">
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">文字内容</h3>
+                                <div className="bg-blue-50/50 border border-blue-100 p-4 rounded-2xl text-slate-700 text-sm whitespace-pre-wrap pr-12 min-h-[80px]">
+                                    {data.message}
+                                </div>
+                                <button 
+                                    onClick={handleCopyText} 
+                                    title="复制文本"
+                                    className="absolute top-8 right-3 w-8 h-8 flex items-center justify-center rounded-lg bg-white shadow-sm border border-blue-100 text-blue-500 hover:bg-blue-50 active:scale-95 transition-all"
+                                >
+                                    <i className={`fa-solid ${copied ? 'fa-check text-green-500' : 'fa-copy'}`}></i>
+                                </button>
+                            </div>
+                        )}
+
+                        {data.files && data.files.length > 0 && (
+                            <div className="shrink-0">
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">文件列表 ({data.files.length})</h3>
+                                <div className="space-y-2">
+                                    {data.files.map((file, idx) => (
+                                        <div key={idx} className="bg-white border border-slate-100 p-3 rounded-2xl flex items-center justify-between shadow-sm">
+                                            <div className="flex items-center gap-3 overflow-hidden w-full">
+                                                <div className="w-10 h-10 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 shrink-0">
+                                                    {downloadingIdx === idx ? <i className="fa-solid fa-circle-notch fa-spin text-blue-500"></i> : <i className="fa-solid fa-file text-xl"></i>}
+                                                </div>
+                                                <div className="flex-1 min-w-0 pr-2">
+                                                    <p className="text-sm font-medium text-slate-700 truncate">{file.name}</p>
+                                                    {downloadingIdx === idx ? (
+                                                        <div className="flex items-center gap-2 text-xs text-blue-500 font-medium mt-0.5">
+                                                            <div className="flex-1 h-1.5 bg-blue-100 rounded-full overflow-hidden">
+                                                                <div className="h-full bg-blue-500 transition-all duration-300 ease-out" style={{ width: `${downloadProgress}%` }}></div>
+                                                            </div>
+                                                            <span className="w-8 text-right">{downloadProgress}%</span>
+                                                            <span className="w-16 text-right whitespace-nowrap">{downloadSpeed}</span>
+                                                        </div>
+                                                    ) : (
+                                                        <p className="text-xs text-slate-400">{formatBytes(file.size)}</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <button onClick={() => handleDownload(idx)} disabled={downloadingIdx !== -1} className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-colors ${downloadingIdx === idx ? 'text-blue-200' : 'text-blue-600 hover:bg-blue-50'}`}>
+                                                <i className="fa-solid fa-download text-lg font-bold"></i>
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-white via-white/90 to-transparent pointer-events-none">
+                        {data.files && data.files.length > 0 ? (
+                            <button onClick={handleDownloadAll} disabled={downloadingIdx !== -1} className={`pointer-events-auto w-full py-4 rounded-2xl font-bold text-white transition-all flex items-center justify-center gap-2 ${downloadingIdx !== -1 ? 'bg-blue-400 cursor-wait shadow-none' : 'bg-blue-600 hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/30 active:scale-[0.98]'}`}>
+                                {downloadingIdx !== -1 ? (
+                                    <><i className="fa-solid fa-circle-notch fa-spin text-xl"></i> 正在下载...</>
+                                ) : (
+                                    <><i className="fa-solid fa-download text-xl"></i> {data.files.length === 1 ? '下载文件' : '全部下载'}</>
+                                )}
+                            </button>
+                        ) : (
+                            <button onClick={handleCopyText} className="pointer-events-auto w-full py-4 rounded-2xl font-bold text-white bg-blue-600 hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-600/30 active:scale-[0.98] transition-all flex items-center justify-center gap-2">
+                                <i className={`fa-solid ${copied ? 'fa-check' : 'fa-copy'} text-xl`}></i> {copied ? '已复制' : '复制文字'}
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
