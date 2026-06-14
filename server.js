@@ -1,298 +1,322 @@
 const express = require('express');
-const multer = require('multer');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+const multer  = require('multer');
+const cors    = require('cors');
+const fs      = require('fs');
+const path    = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ==========================================
-// 规范化专业日志系统
-// ==========================================
-const log = (level, action, message) => {
-    const time = new Date().toLocaleString('zh-CN', { 
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: false 
-    });
-    console.log(`[${time}] Flashdrop | [${level}] ${action} - ${message}`);
+// ── Config ────────────────────────────────────────────────────────────────────
+const CFG = {
+    MAX_STORAGE:   20 * 1024 ** 3,          // 20 GB
+    MAX_FILE_SIZE:  5 * 1024 ** 3,          // 5 GB per file
+    FILE_LIFETIME:  7 * 24 * 3600_000 + 3_600_000, // 7d + 1h grace
+    TOKEN_TTL:     30 * 60_000,             // 30 min
+    CLEAN_INTERVAL: 60 * 60_000,            // hourly sweep
+    RL_WINDOW:      60_000,
+    RL_UPLOAD:  10,                         // per-IP per minute
+    RL_VERIFY:  30,
+    RETENTION: {
+        '1h':  1 * 3_600_000,
+        '10h': 10 * 3_600_000,
+        '1d':  24 * 3_600_000,
+        '3d':  3 * 24 * 3_600_000,
+        '7d':  7 * 24 * 3_600_000,
+    },
 };
 
-app.use(cors({
-    exposedHeaders: ['Content-Length']
-}));
-app.use(express.json());
-app.use(express.text({ type: ['text/plain', 'application/json'] }));
-app.use(express.static(path.join(__dirname, 'public')));
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+const DATA_DIR   = path.join(__dirname, 'data');
+const DB_FILE    = path.join(DATA_DIR, 'codes.json');
 
-// 全局容量与时间设置
-const MAX_TOTAL_STORAGE = 20 * 1024 * 1024 * 1024; // 20GB 
-const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024;      // 5GB 
+// ── Logging ───────────────────────────────────────────────────────────────────
+const CLR = { INFO: '\x1b[32m', WARN: '\x1b[33m', ERROR: '\x1b[31m', R: '\x1b[0m' };
+const log = (level, action, msg) => {
+    const ts = new Date().toLocaleString('zh-CN', {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    console.log(`${CLR[level] || ''}[${ts}] ${level.padEnd(5)} │ ${action.padEnd(8)} │ ${msg}${CLR.R}`);
+};
 
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
+// ── Init dirs ─────────────────────────────────────────────────────────────────
+for (const dir of [UPLOAD_DIR, DATA_DIR]) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + '-' + Buffer.from(file.originalname, 'latin1').toString('utf8'));
-    }
-});
-const upload = multer({ 
-    storage: storage,
-    limits: { fileSize: MAX_FILE_SIZE } 
+// ── Multer ────────────────────────────────────────────────────────────────────
+const upload = multer({
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+        filename: (req, file, cb) => {
+            const safeName = file.originalname.replace(/[/\\?%*:|"<>]/g, '_');
+            cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}-${safeName}`);
+        },
+    }),
+    limits: { fileSize: CFG.MAX_FILE_SIZE },
+    defParamCharset: 'utf8',
 });
 
-const codesDB = new Map();     
+// ── In-memory DB + JSON persistence ──────────────────────────────────────────
+const codesDB      = new Map();
 const activeTokens = new Map();
 
-/**
- * 20GB 容量巡检清理机制
- */
-const enforceStorageLimit = () => {
-    fs.readdir(uploadDir, (err, files) => {
-        if (err) return;
-        let fileStats = [];
-        files.forEach(file => {
-            const filePath = path.join(uploadDir, file);
-            try {
-                const stats = fs.statSync(filePath);
-                fileStats.push({ path: filePath, size: stats.size, mtime: stats.mtimeMs });
-            } catch (e) {}
+const saveDB = () => {
+    try {
+        const rows = [...codesDB.entries()].map(([c, d]) => [
+            c, { ...d, sharedRef: { count: d.sharedRef.count } },
+        ]);
+        fs.writeFile(DB_FILE, JSON.stringify(rows), err => {
+            if (err) log('ERROR', 'DB', `写入失败: ${err.message}`);
         });
+    } catch (e) { log('ERROR', 'DB', `序列化失败: ${e.message}`); }
+};
 
-        let totalSize = fileStats.reduce((sum, f) => sum + f.size, 0);
-        
-        if (totalSize > MAX_TOTAL_STORAGE) {
-            log('WARN', 'SYSTEM', `总容量已达 ${(totalSize / 1024 / 1024 / 1024).toFixed(2)}GB，触发旧文件清理`);
-            fileStats.sort((a, b) => a.mtime - b.mtime);
-            for (let f of fileStats) {
-                if (totalSize <= MAX_TOTAL_STORAGE) break;
-                try {
-                    fs.unlinkSync(f.path);
-                    totalSize -= f.size;
-                    log('INFO', 'CLEANUP', `成功释放超载旧文件: ${path.basename(f.path)}`);
-                } catch(e) {}
-            }
+const loadDB = () => {
+    try {
+        if (!fs.existsSync(DB_FILE)) return;
+        const now = Date.now();
+        let ok = 0, skip = 0;
+        for (const [code, d] of JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))) {
+            if (d.expiresAt > now && d.files.every(f => fs.existsSync(f.path))) {
+                const entry = { ...d, sharedRef: { count: d.sharedRef.count } };
+                codesDB.set(code, entry);
+                // Re-register cleanup timer so files are deleted when this code expires
+                setTimeout(() => {
+                    codesDB.delete(code);
+                    entry.files.forEach(f => { try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {} });
+                    saveDB();
+                    log('INFO', 'EXPIRE', `[${code}] 恢复码到期，已清理`);
+                }, d.expiresAt - now);
+                ok++;
+            } else { skip++; }
+        }
+        if (ok || skip) log('INFO', 'SYSTEM', `恢复 ${ok} 个取件码，跳过 ${skip} 条过期记录`);
+    } catch (e) { log('WARN', 'SYSTEM', `DB 恢复失败: ${e.message}`); }
+};
+
+loadDB();
+
+// ── Rate limiter ──────────────────────────────────────────────────────────────
+const rlStore = new Map();
+
+const rateLimit = (max, win) => (req, res, next) => {
+    const ip  = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    const key = `${req.path}|${ip}`;
+    const now = Date.now();
+    const rec = rlStore.get(key) || { n: 0, reset: now + win };
+    if (now > rec.reset) { rec.n = 0; rec.reset = now + win; }
+    if (++rec.n > max) {
+        rlStore.set(key, rec);
+        log('WARN', 'RATELMT', `IP ${ip} 已限流`);
+        return res.status(429).json({ error: '请求频率过高，请稍候再试' });
+    }
+    rlStore.set(key, rec);
+    next();
+};
+
+// ── Middleware ────────────────────────────────────────────────────────────────
+app.use((_, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+});
+app.use(cors({ exposedHeaders: ['Content-Length', 'Content-Disposition'] }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const getIp = (req) =>
+    (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+
+const releaseFiles = (d) => {
+    d.sharedRef.count--;
+    if (d.sharedRef.count <= 0) {
+        d.files.forEach(f => { try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {} });
+        saveDB();
+        return true;
+    }
+    saveDB();
+    return false;
+};
+
+const enforceStorage = () => {
+    fs.readdir(UPLOAD_DIR, (err, files) => {
+        if (err) return;
+        const stats = files.flatMap(f => {
+            try {
+                const fp = path.join(UPLOAD_DIR, f);
+                const s  = fs.statSync(fp);
+                return [{ path: fp, size: s.size, mtime: s.mtimeMs }];
+            } catch { return []; }
+        });
+        let total = stats.reduce((s, f) => s + f.size, 0);
+        if (total <= CFG.MAX_STORAGE) return;
+        log('WARN', 'STORAGE', `${(total / 1024 ** 3).toFixed(2)} GB 超限，清理旧文件`);
+        for (const f of stats.sort((a, b) => a.mtime - b.mtime)) {
+            if (total <= CFG.MAX_STORAGE) break;
+            try { fs.unlinkSync(f.path); total -= f.size; } catch {}
         }
     });
 };
 
-/**
- * 托底清扫：定时抹除 7 天前的僵尸文件
- */
-const MAX_SAFE_LIFETIME = 7 * 24 * 60 * 60 * 1000 + 3600 * 1000;
+// ── Periodic tasks ────────────────────────────────────────────────────────────
 setInterval(() => {
     const now = Date.now();
-    fs.readdir(uploadDir, (err, files) => {
+    fs.readdir(UPLOAD_DIR, (err, files) => {
         if (err) return;
-        files.forEach(file => {
-            const filePath = path.join(uploadDir, file);
-            fs.stat(filePath, (err, stats) => {
-                if (!err && (now - stats.mtimeMs > MAX_SAFE_LIFETIME)) {
-                    try { fs.unlinkSync(filePath); } catch(e) {}
-                }
+        files.forEach(f => {
+            const fp = path.join(UPLOAD_DIR, f);
+            fs.stat(fp, (e, s) => {
+                if (!e && now - s.mtimeMs > CFG.FILE_LIFETIME) try { fs.unlinkSync(fp); } catch {}
             });
         });
     });
-}, 60 * 60 * 1000);
+}, CFG.CLEAN_INTERVAL);
 
-/**
- * 接口1：上传并批量生成 00-99 取件码
- */
-app.post('/api/upload', (req, res) => {
-    const reqIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, r] of rlStore) if (now > r.reset) rlStore.delete(k);
+}, 5 * 60_000);
 
-    upload.array('files')(req, res, (err) => {
-        if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
-            log('WARN', 'UPLOAD', `IP: ${reqIp} 的上传被拒绝 (超出2GB防爆拦截)`);
-            return res.status(400).json({ error: '上传失败：文件大小超出 2GB 限制' });
-        } else if (err) {
-            log('ERROR', 'UPLOAD', `上传异常: ${err.message}`);
-            return res.status(500).json({ error: '上传异常' });
-        }
+// ── Routes ────────────────────────────────────────────────────────────────────
+
+app.post('/api/upload', rateLimit(CFG.RL_UPLOAD, CFG.RL_WINDOW), (req, res) => {
+    const ip = getIp(req);
+    upload.array('files')(req, res, err => {
+        if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE')
+            return res.status(400).json({ error: '文件大小超出 5GB 限制' });
+        if (err) { log('ERROR', 'UPLOAD', err.message); return res.status(500).json({ error: '上传异常' }); }
 
         try {
-            const files = req.files || [];
-            const message = req.body.message || '';
-            
-            // 解析数量要求 (1 ~ 5)
-            let reqQuantity = parseInt(req.body.quantity) || 1;
-            if (reqQuantity < 1) reqQuantity = 1;
-            if (reqQuantity > 5) reqQuantity = 5;
+            const files    = req.files || [];
+            const message  = (req.body.message || '').slice(0, 10000).trim();
+            const quantity = Math.max(1, Math.min(5, parseInt(req.body.quantity) || 1));
+            const lifeTime = CFG.RETENTION[req.body.retention] ?? CFG.RETENTION['10h'];
+            const retKey   = CFG.RETENTION[req.body.retention] != null ? req.body.retention : '10h';
 
-            // 解析用户定制生命周期
-            let reqRetention = req.body.retention || '10h';
-            let lifeTime = 10 * 3600000;
-            if (reqRetention === '1h') lifeTime = 3600000;
-            if (reqRetention === '1d') lifeTime = 24 * 3600000;
-            if (reqRetention === '3d') lifeTime = 3 * 24 * 3600000;
-            if (reqRetention === '7d') lifeTime = 7 * 24 * 3600000;
+            if (!files.length && !message)
+                return res.status(400).json({ error: '请上传文件或输入文字内容' });
 
+            // Generate unique pickup codes
             const codes = [];
-            for (let i = 0; i < reqQuantity; i++) {
-                let code;
-                let attempts = 0;
-                do {
-                    code = String(Math.floor(Math.random() * 100)).padStart(2, '0');
-                    attempts++;
-                    if (attempts > 200) {
-                        log('ERROR', 'SYSTEM', '高并发警告，取件码池已满');
-                        return res.status(500).json({ error: '取件码暂满，请稍后再试' });
-                    }
-                } while (codesDB.has(code) || codes.includes(code));
-                codes.push(code);
+            let tries = 0;
+            while (codes.length < quantity) {
+                if (++tries > 300)
+                    return res.status(503).json({ error: '取件码资源紧张，请稍后再试' });
+                const c = String(Math.floor(Math.random() * 100)).padStart(2, '0');
+                if (!codesDB.has(c) && !codes.includes(c)) codes.push(c);
             }
 
-            const fileData = files.map(f => ({
-                name: Buffer.from(f.originalname, 'latin1').toString('utf8'),
+            const fileData  = files.map(f => ({
+                name: f.originalname,
                 size: f.size,
-                path: f.path 
+                path: f.path,
             }));
-
-            // 【内存引用计数算法】所有独立码共享同一份文件的销毁权
-            const sharedRef = { count: reqQuantity };
+            const sharedRef = { count: quantity };
             const expiresAt = Date.now() + lifeTime;
+            codes.forEach(c => codesDB.set(c, { files: fileData, message, expiresAt, sharedRef }));
+            saveDB();
+            log('INFO', 'UPLOAD', `IP ${ip} | [${codes.join(', ')}] | ${retKey} | ${files.length} 文件`);
 
-            codes.forEach(c => {
-                codesDB.set(c, { files: fileData, message, expiresAt, sharedRef });
-            });
-
-            log('INFO', 'UPLOAD', `上传成功 | IP: ${reqIp} | 签发取件码: [${codes.join(', ')}] | 有效期: ${reqRetention}`);
-
-            // 挂载生命周期结束时的物理销毁任务
             setTimeout(() => {
                 codes.forEach(c => codesDB.delete(c));
-                fileData.forEach(f => {
-                    try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch(e){}
-                });
-                log('INFO', 'TIMEOUT', `生命周期结束 | 批次 [${codes.join(', ')}] 已从系统被强制物理销毁`);
+                fileData.forEach(f => { try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {} });
+                saveDB();
+                log('INFO', 'EXPIRE', `[${codes.join(', ')}] 到期，文件已销毁`);
             }, lifeTime);
 
-            enforceStorageLimit();
-
+            enforceStorage();
             res.json({ codes });
-        } catch (error) {
-            log('ERROR', 'UPLOAD', `服务器内部异常: ${error.message}`);
-            res.status(500).json({ error: '服务器错误' });
+        } catch (e) {
+            log('ERROR', 'UPLOAD', e.message);
+            res.status(500).json({ error: '服务器内部错误' });
         }
     });
 });
 
-/**
- * 接口2：验证
- */
-app.post('/api/verify', (req, res) => {
-    const reqIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    let code = req.body.code;
-    
-    if (!code && typeof req.body === 'string') {
-        try { code = JSON.parse(req.body).code; } catch(e) {}
-    }
-    
-    if (!code || !codesDB.has(code)) {
-        log('WARN', 'VERIFY', `IP: ${reqIp} 校验拒绝 | 无效取件码: [${code || '空'}]`);
-        return res.status(404).json({ error: '无效码' });
-    }
+app.post('/api/verify', rateLimit(CFG.RL_VERIFY, CFG.RL_WINDOW), (req, res) => {
+    const ip   = getIp(req);
+    const { code } = req.body;
+
+    if (!code || !/^\d{2}$/.test(code))
+        return res.status(400).json({ error: '取件码格式错误' });
 
     const data = codesDB.get(code);
+    if (!data) {
+        log('WARN', 'VERIFY', `IP ${ip} | 无效码 [${code}]`);
+        return res.status(404).json({ error: '无效取件码' });
+    }
     if (Date.now() > data.expiresAt) {
-        codesDB.delete(code);
-        log('WARN', 'VERIFY', `IP: ${reqIp} 校验拒绝 | 取件码 [${code}] 已过期`);
-        return res.status(404).json({ error: '已过期' });
+        codesDB.delete(code); saveDB();
+        log('WARN', 'VERIFY', `IP ${ip} | 已过期码 [${code}]`);
+        return res.status(404).json({ error: '取件码已过期' });
     }
 
-    codesDB.delete(code); 
+    codesDB.delete(code); saveDB();
     const token = uuidv4();
     activeTokens.set(token, data);
+    log('INFO', 'VERIFY', `IP ${ip} | 码 [${code}] 消耗，Token 已签发`);
 
-    log('INFO', 'VERIFY', `校验成功 | IP: ${reqIp} | 取件码: [${code}] 被消耗并签发准入 Token`);
-
-    // 僵尸Token清理（防占空间：如果提取了但不下载，30分钟强制减1次引用）
     setTimeout(() => {
-        if (activeTokens.has(token)) {
-            const tokenData = activeTokens.get(token);
-            activeTokens.delete(token);
-            
-            tokenData.sharedRef.count--;
-            if (tokenData.sharedRef.count <= 0) {
-                tokenData.files.forEach(f => {
-                    try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch(e){}
-                });
-                log('INFO', 'TIMEOUT', `僵尸Token超时清理完成，所有引用提取完毕，已物理粉碎`);
-            }
-        }
-    }, 30 * 60 * 1000);
+        if (!activeTokens.has(token)) return;
+        const d = activeTokens.get(token);
+        activeTokens.delete(token);
+        releaseFiles(d);
+        log('INFO', 'EXPIRE', 'Token 超时，自动回收');
+    }, CFG.TOKEN_TTL);
 
-    const safeFiles = data.files.map(f => ({ name: f.name, size: f.size, url: `/api/download/${token}/${f.name}` }));
-    res.json({ token, files: safeFiles, message: data.message });
+    res.json({
+        token,
+        files: data.files.map((f, i) => ({ name: f.name, size: f.size, url: `/api/download/${token}/${i}` })),
+        message: data.message,
+    });
 });
 
-/**
- * 接口3：前端退出即焚
- */
-app.post('/api/destroy', (req, res) => {
-    try {
-        let token;
-        if (req.body && req.body.token) token = req.body.token;
-        else if (typeof req.body === 'string') token = JSON.parse(req.body).token;
+app.get('/api/download/:token/:index', (req, res) => {
+    const { token } = req.params;
+    const index = parseInt(req.params.index);
+    const ip = getIp(req);
 
-        if (token && activeTokens.has(token)) {
-            const tokenData = activeTokens.get(token);
-            activeTokens.delete(token);
-            
-            tokenData.sharedRef.count--;
-            if (tokenData.sharedRef.count <= 0) {
-                tokenData.files.forEach(f => {
-                    try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch(e){}
-                });
-                log('INFO', 'DESTROY', `接收客户端销毁指令 | 全部提取完毕，已彻底物理粉碎本地文件`);
-            } else {
-                log('INFO', 'DESTROY', `接收客户端销毁指令 | 暂留物理文件 (剩余未使用取件码: ${tokenData.sharedRef.count} 个)`);
-            }
-        }
-    } catch (e) {}
+    const data = activeTokens.get(token);
+    if (!data) return res.status(404).json({ error: 'Token 无效或已过期' });
+    if (isNaN(index) || index < 0 || index >= data.files.length)
+        return res.status(400).json({ error: '无效文件索引' });
+
+    const file = data.files[index];
+    if (!fs.existsSync(file.path)) {
+        log('ERROR', 'DOWNLOAD', `IP ${ip} | 文件丢失: ${file.name}`);
+        return res.status(404).json({ error: '文件已被销毁' });
+    }
+
+    log('INFO', 'DOWNLOAD', `IP ${ip} | ${file.name}`);
+    res.download(file.path, file.name, err => {
+        if (err && !res.headersSent) log('ERROR', 'DOWNLOAD', `传输中断: ${err.message}`);
+    });
+});
+
+app.post('/api/destroy', (req, res) => {
+    const { token } = req.body || {};
+    if (token && activeTokens.has(token)) {
+        const d    = activeTokens.get(token);
+        activeTokens.delete(token);
+        const done = releaseFiles(d);
+        log('INFO', 'DESTROY', done ? '文件已彻底销毁' : `引用剩余 ${d.sharedRef.count}`);
+    }
     res.sendStatus(200);
 });
 
-/**
- * 接口4：流媒体下载
- * 【重要修复】移除了传输完成后的 fs.unlinkSync()，因为大文件分片可能被此语句拦截。
- */
-app.get('/api/download/:token/:fileIndex', (req, res) => {
-    const { token, fileIndex } = req.params;
-    const reqIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+app.get('/api/health', (_, res) =>
+    res.json({ ok: true, codes: codesDB.size, tokens: activeTokens.size }),
+);
 
-    if (!activeTokens.has(token)) {
-        log('WARN', 'DOWNLOAD', `拒绝下载 | IP: ${reqIp} | Token无效或已过期`);
-        return res.status(404).send('失效');
-    }
+app.get('/:code([0-9]{2})', (req, res) =>
+    res.sendFile(path.join(__dirname, 'public', 'index.html')),
+);
 
-    const data = activeTokens.get(token);
-    const file = data.files[parseInt(fileIndex)];
+app.get('*', (req, res) => res.redirect('/'));
 
-    if (!file || !fs.existsSync(file.path)) {
-        log('ERROR', 'DOWNLOAD', `下载中断 | IP: ${reqIp} | 文件在服务器底层丢失`);
-        return res.status(404).send('不存在');
-    }
-
-    log('INFO', 'DOWNLOAD', `开始传输 | IP: ${reqIp} | 文件名: ${file.name}`);
-
-    // 这里仅做纯粹的下载，不再参杂任何强行删除代码，保证百兆大文件能够满速跑完
-    res.download(file.path, file.name, (err) => {
-        if (err) {
-            log('ERROR', 'DOWNLOAD', `传输中断或取消 | IP: ${reqIp} | 文件名: ${file.name}`);
-        } else {
-            log('INFO', 'DOWNLOAD', `传输成功完成 | IP: ${reqIp} | 文件名: ${file.name}`);
-        }
-    });
-});
-
-app.listen(PORT, () => {
-    log('INFO', 'SYSTEM', `服务器已就绪，当前监听端口: ${PORT}`);
-});
+app.listen(PORT, () => log('INFO', 'SYSTEM', `Flashdrop 已就绪 | 端口 ${PORT}`));

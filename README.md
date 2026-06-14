@@ -1,45 +1,248 @@
-# 闪传 (Flashdrop)
+# 闪传 · Flashdrop
 
-**极简文件私有云传输工具**
+极简点对点文件传输——用 2 位取件码，无需账号，即传即走，自动销毁。
 
-闪传 (Flashdrop) 是一个基于 Node.js 和 React 构建的轻量级、即用即走的文件与文本中转站。它专为快速分享设计，提供由取件码驱动的提取方式、实时的传输进度反馈，以及高度注重隐私的“阅后即焚”和自动清理机制。
+---
 
-## ✨ 核心特性
+## 功能特性
 
-### 🚀 基础功能
-* **文本与文件双栖传输**：支持大段纯文本内容的粘贴分享，也支持多文件的拖拽上传。
-* **极简取件码机制**：自动生成 2 位数（00-99）的提取码，最高支持为同一次上传生成 1~5 个独立的取件码。
-* **实时进度反馈**：无论上传还是下载，均提供实时的百分比进度条与传输速率（如 `MB/s`）显示。
-* **全局实体键盘交互**：在接收界面深度集成了全局键盘监听，用户可直接敲击键盘上的 `0-9`、`Backspace` (删除)、`Esc` (清空) 进行盲操输入，满 2 位自动触发校验。
+- **2 位取件码**：00–99，输入即取，无需复制长链接
+- **多码支持**：一次上传可生成最多 5 个独立取件码（适合分发给不同接收者）
+- **纯文字传输**：不上传文件也能分享一段文本
+- **自动销毁**：取件码消耗后文件即从服务器删除；未被取走的文件在设定时限内自动清除
+- **灵活时效**：1 小时 / 10 小时 / 1 天 / 3 天 / 7 天
+- **直达链接**：`https://your-domain.com/42`，扫码或点击直接进入取件页
+- **下载追踪**：前端显示每个文件的下载进度与速度，全部下载完成后出现「完成」按钮
+- **无构建工具**：前端用 [HTM](https://github.com/developit/htm) 代替 Babel，零编译，CDN 直接加载
 
-### 🛡️ 隐私与存储调度机制
-* **“阅后即焚”物理销毁**：
-  * 基于 `navigator.sendBeacon` 技术，当接收方关闭网页或离开结算页时，前端会静默发送销毁指令。
-  * **引用计数算法**：如果生成了多个取件码，服务器会通过 `sharedRef` 计数器管理物理文件。只有当所有取件码都被消耗完，物理文件才会从硬盘彻底抹除。
-* **灵活的文件生命周期**：上传时可自定义文件的保存时间（1小时、10小时、1天、3天、7天），超时后服务器自动执行物理粉碎。
-* **智能容量巡检 (LRU)**：
-  * **单文件限制**：硬编码最高支持 `5GB` 的单文件上传防爆拦截。
-  * **全局容量守护**：服务器全局存储上限设定为 `20GB`。每次上传时会自动巡检，若超出限制，将自动按时间顺序（最旧优先）物理删除文件以释放空间。
-  * **僵尸文件清扫**：后台每小时自动运行定时任务，强制抹除超过 7 天的异常驻留文件与超时的访问 Token。
+---
 
-### 🎨 现代化 UI / UX
-* **毛玻璃拟态美学 (Glassmorphism)**：采用 TailwindCSS 构建了精美的半透明磨砂玻璃卡片 UI，配合丝滑的过渡动画（渐显、上浮、缩放、错误震动）。
-* **防白屏骨架屏**：内置加载动画，在 React 引擎与 CDN 资源初始化完成前提供优雅的过渡体验。
-* **单文件静默下载**：若分享内容仅包含单一文件且无留言文本，接收端输入取件码后系统将自动唤起下载，免去二次点击。
+## 快速开始
 
-## 🛠️ 技术栈
+### 环境要求
 
-* **前端环境**：React 18 (CDN 引入，无构建步骤) + TailwindCSS + FontAwesome
-* **后端引擎**：Node.js + Express
-* **文件处理**：Multer (实现基于磁盘存储的流式分块上传)
-* **唯一标识**：uuid
-* **跨域控制**：cors
+- Node.js ≥ 18
 
-## 📦 安装与运行
+### 安装与启动
 
-本项目无需安装数据库（如 MySQL/Redis），所有状态（取件码、Token、引用计数）均在 Node.js 内存中高效维护，开箱即用。
+```bash
+git clone https://github.com/your-name/flashdrop.git
+cd flashdrop
+npm install
+npm start          # 生产模式，端口 3000
+# 或
+npm run dev        # 开发模式，nodemon 热重载
+```
 
-1. **克隆代码到本地**
-2. **安装依赖**
-   ```bash
-   npm install
+访问 [http://localhost:3000](http://localhost:3000)
+
+### 自定义端口
+
+```bash
+PORT=8080 npm start
+```
+
+---
+
+## 项目结构
+
+```
+flashdrop/
+├── server.js          # Express 后端
+├── public/
+│   └── index.html     # 前端单页应用（React 18 + HTM + Tailwind CSS）
+├── uploads/           # 上传文件临时存储（自动创建）
+├── data/
+│   └── codes.json     # 取件码持久化（自动创建，重启后恢复）
+└── package.json
+```
+
+---
+
+## 技术栈
+
+### 后端
+
+| 技术 | 用途 |
+|------|------|
+| Express 4 | HTTP 服务器 |
+| Multer | 文件上传（multipart/form-data） |
+| uuid | 下载 Token 生成 |
+| Node.js `fs` | 文件管理 + JSON 持久化 |
+
+### 前端
+
+| 技术 | 用途 |
+|------|------|
+| React 18（CDN） | UI 框架 |
+| HTM 3（CDN） | JSX-like 模板，无需编译 |
+| Tailwind CSS（CDN） | 样式 |
+| Font Awesome 6（CDN） | 图标 |
+
+---
+
+## API 文档
+
+### `POST /api/upload`
+
+上传文件或文字，生成取件码。
+
+**Request**：`multipart/form-data`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `files` | File[] | 文件（可选，支持多文件） |
+| `message` | string | 文字内容（可选，最多 5000 字） |
+| `retention` | string | 有效期：`1h` / `10h` / `1d` / `3d` / `7d`，默认 `10h` |
+| `quantity` | number | 生成取件码数量 1–5，默认 1 |
+
+**Response 200**
+
+```json
+{ "codes": ["07", "42"] }
+```
+
+**限流**：每 IP 每分钟最多 10 次
+
+---
+
+### `POST /api/verify`
+
+核销取件码，获取下载 Token。
+
+**Request**：`application/json`
+
+```json
+{ "code": "42" }
+```
+
+**Response 200**
+
+```json
+{
+  "token": "uuid-v4",
+  "message": "可选文字内容",
+  "files": [
+    { "name": "report.pdf", "size": 102400, "url": "/api/download/token/0" }
+  ]
+}
+```
+
+**说明**：取件码核销后即从数据库删除（一次性）；Token 有效期 30 分钟。
+
+**限流**：每 IP 每分钟最多 30 次
+
+---
+
+### `GET /api/download/:token/:index`
+
+下载单个文件。
+
+| 参数 | 说明 |
+|------|------|
+| `token` | `/api/verify` 返回的 Token |
+| `index` | 文件列表下标（从 0 开始） |
+
+响应为文件流（带 `Content-Disposition: attachment`）。
+
+---
+
+### `POST /api/destroy`
+
+主动销毁 Token 并释放文件引用（接收方离开页面时自动调用）。
+
+**Request**：`application/json`
+
+```json
+{ "token": "uuid-v4" }
+```
+
+响应 `200 OK`（无 body）。
+
+---
+
+### `GET /api/health`
+
+健康检查。
+
+```json
+{ "ok": true, "codes": 3, "tokens": 1 }
+```
+
+---
+
+## 配置说明
+
+所有配置在 `server.js` 顶部的 `CFG` 对象中修改：
+
+```js
+const CFG = {
+    MAX_STORAGE:    20 * 1024 ** 3,   // 服务器最大存储用量（超限自动清理最旧文件）
+    MAX_FILE_SIZE:   5 * 1024 ** 3,   // 单文件最大体积
+    FILE_LIFETIME:   7 * 24 * 3600_000 + 3_600_000, // 文件硬过期时间（兜底扫描）
+    TOKEN_TTL:      30 * 60_000,      // 下载 Token 有效期
+    CLEAN_INTERVAL: 60 * 60_000,      // 过期文件扫描间隔
+    RL_WINDOW:       60_000,           // 限流窗口（毫秒）
+    RL_UPLOAD:  10,                   // 上传接口每 IP 每窗口最大请求数
+    RL_VERIFY:  30,                   // 验证接口每 IP 每窗口最大请求数
+};
+```
+
+---
+
+## 数据持久化
+
+- 取件码与文件元信息保存到 `data/codes.json`
+- 服务器重启后自动恢复有效取件码，并为每个码重新注册过期清理计时器
+- 过期的或文件已丢失的记录会在恢复时自动跳过
+
+---
+
+## 部署建议
+
+### Nginx 反向代理（推荐）
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    client_max_body_size 5g;       # 与 CFG.MAX_FILE_SIZE 保持一致
+
+    location / {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection 'upgrade';
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Forwarded-For $remote_addr;
+        proxy_read_timeout 600s;    # 大文件下载需要更长超时
+        proxy_send_timeout 600s;
+    }
+}
+```
+
+### PM2 进程守护
+
+```bash
+npm install -g pm2
+pm2 start server.js --name flashdrop
+pm2 save
+pm2 startup
+```
+
+---
+
+## 安全说明
+
+- 取件码**一次性消耗**，核销后立即从内存与持久化中删除
+- 文件名经过特殊字符过滤（路径穿越防护）
+- 响应头包含 `X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、`Referrer-Policy`
+- 内置 IP 级请求限流，防止暴力枚举取件码
+- 接收方离开页面时通过 `sendBeacon` 主动销毁 Token 并释放文件
+
+---
+
+## License
+
+MIT
