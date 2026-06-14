@@ -235,6 +235,7 @@
         const [quantity, setQuantity]   = useState(1);
         const [isDragging, setIsDrag]   = useState(false);
         const [isUploading, setUploading] = useState(false);
+        const [processing, setProcessing] = useState(false);
         const [progress, setProgress]   = useState(0);
         const [speed, setSpeed]         = useState('');
         const [error, setError]         = useState('');
@@ -247,7 +248,7 @@
 
         const handleSubmit = () => {
             if (!files.length && !message.trim()) return;
-            setUploading(true); setProgress(0); setSpeed(''); setError('');
+            setUploading(true); setProcessing(false); setProgress(0); setSpeed(''); setError('');
 
             const fd = new FormData();
             files.forEach(f => fd.append('files', f));
@@ -261,15 +262,19 @@
             let lastLoaded = 0, lastTime = Date.now();
             xhr.upload.onprogress = (e) => {
                 if (!e.lengthComputable) return;
-                setProgress(Math.floor(e.loaded / e.total * 100));
+                const pct = Math.floor(e.loaded / e.total * 100);
+                setProgress(pct);
                 const now = Date.now(), dt = (now - lastTime) / 1000;
                 if (dt >= 0.5) {
                     setSpeed(formatSpeed((e.loaded - lastLoaded) / dt));
                     lastLoaded = e.loaded; lastTime = now;
                 }
+                // Bytes are flushed to the socket; the server is still receiving + writing.
+                // Switch to an indeterminate "processing" state so 100% never looks frozen.
+                if (e.loaded >= e.total) { setProcessing(true); setSpeed(''); }
             };
             xhr.onload = () => {
-                setUploading(false);
+                setUploading(false); setProcessing(false);
                 if (xhr.status >= 200 && xhr.status < 300) {
                     try {
                         const data = JSON.parse(xhr.responseText);
@@ -282,7 +287,7 @@
                     catch { setError(xhr.status === 413 ? '文件超出 5GB 限制' : `上传失败 (${xhr.status})`); }
                 }
             };
-            xhr.onerror = () => { setUploading(false); setError('网络异常，请检查连接'); };
+            xhr.onerror = () => { setUploading(false); setProcessing(false); setError('网络异常，请检查连接'); };
             xhr.send(fd);
         };
 
@@ -402,12 +407,16 @@
                             ${!canSubmit && !isUploading
                                 ? 'bg-slate-200 dark:bg-slate-700 cursor-not-allowed text-slate-400 dark:text-slate-500'
                                 : 'bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-600/30 active:scale-[0.98]'}`}>
-                        ${isUploading ? html`
+                        ${isUploading ? (processing ? html`
+                            <div className="absolute inset-0 bg-white/15"></div>
+                            <i className="fa-solid fa-circle-notch fa-spin relative z-10"></i>
+                            <span className="relative z-10">服务器处理中…</span>
+                        ` : html`
                             <div className="absolute inset-y-0 left-0 bg-white/15 transition-all duration-300 ease-out rounded-l-2xl" style=${{ width: `${progress}%` }}></div>
                             <i className="fa-solid fa-circle-notch fa-spin relative z-10"></i>
                             <span className="relative z-10">上传中 ${progress}%</span>
                             ${speed && html`<span className="relative z-10 text-xs font-normal opacity-70">${speed}</span>`}
-                        ` : html`
+                        `) : html`
                             获取取件码
                             <i className="fa-solid fa-arrow-right text-sm"></i>
                         `}
@@ -510,13 +519,19 @@
         const [input, setInput]       = useState('');
         const [error, setError]       = useState(false);
         const [checking, setChecking] = useState(false);
+        const verifiedRef             = useRef('');   // code already submitted — never re-verify it
 
         useEffect(() => {
             if (initialCode && input === '') setTimeout(() => setInput(initialCode), 250);
         }, [initialCode]);
 
         useEffect(() => {
-            if (input.length === 2 && !error && !checking) verifyCode(input);
+            // Reset the guard once the input is cleared so the user can retry.
+            if (input.length < 2) { verifiedRef.current = ''; return; }
+            if (!error && !checking && verifiedRef.current !== input) {
+                verifiedRef.current = input;
+                verifyCode(input);
+            }
         }, [input, error, checking]);
 
         const press = useCallback((key) => {
@@ -555,6 +570,7 @@
                         ...data,
                         files: data.files.map((f, i) => ({ ...f, url: `${API}/download/${data.token}/${i}` })),
                     });
+                    setInput('');          // clear so the consumed code doesn't linger / re-fire
                     setView('confirm');
                 } else {
                     throw new Error();
@@ -913,11 +929,11 @@
                         <!-- Content: leaving view exits, entering view comes in simultaneously -->
                         <div className="flex-1 relative overflow-hidden">
                             ${leavingView && html`
-                                <div key=${'out-'+leavingView} className=${`absolute inset-0 ${leaveCls} pointer-events-none z-10`}>
+                                <div key=${leavingView} className=${`absolute inset-0 ${leaveCls} pointer-events-none z-10`}>
                                     ${renderView(leavingView)}
                                 </div>
                             `}
-                            <div key=${'in-'+view} className=${`absolute inset-0 ${enterCls} z-20`}>
+                            <div key=${view} className=${`absolute inset-0 ${enterCls} z-20`}>
                                 ${renderView(view)}
                             </div>
                         </div>
