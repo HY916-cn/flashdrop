@@ -514,7 +514,7 @@
     };
 
     // ── ReceiveView ────────────────────────────────────────────────────────────
-    const ReceiveView = ({ setView, setDownloadData, initialCode }) => {
+    const ReceiveView = ({ setView, setDownloadData, initialCode, clearInitialCode }) => {
         const showToast = useContext(ToastCtx);
         const [input, setInput]       = useState('');
         const [error, setError]       = useState(false);
@@ -522,7 +522,10 @@
         const verifiedRef             = useRef('');   // code already submitted — never re-verify it
 
         useEffect(() => {
-            if (initialCode && input === '') setTimeout(() => setInput(initialCode), 250);
+            if (initialCode && input === '') {
+                setTimeout(() => setInput(initialCode), 250);
+                clearInitialCode();   // consume once — never auto-fill a stale code on re-entry
+            }
         }, [initialCode]);
 
         useEffect(() => {
@@ -583,11 +586,19 @@
             }
         };
 
+        // Accept a bare code ("42") or a copied link ("domain.com/42", "https://x.com/42?ref=1").
+        const extractCode = (raw) => {
+            const t = (raw || '').trim();
+            if (/^\d{2}$/.test(t)) return t;
+            const m = t.match(/\/(\d{2})\/?(?:[?#].*)?$/);
+            return m ? m[1] : null;
+        };
+
         const pasteCode = async () => {
             try {
-                const text = (await navigator.clipboard.readText()).trim();
-                if (/^\d{2}$/.test(text)) { setInput(text); }
-                else showToast('剪贴板中没有发现取件码');
+                const code = extractCode(await navigator.clipboard.readText());
+                if (code) setInput(code);
+                else showToast('剪贴板中没有发现取件码或链接');
             } catch { showToast('无法读取剪贴板（请授权）'); }
         };
 
@@ -896,7 +907,7 @@
             if (v === 'home')    return html`<${HomeView}    setView=${navigate} />`;
             if (v === 'send')    return html`<${SendView}    setView=${navigate} setGeneratedCodes=${setCodes} setRetentionDisplay=${setRetention} />`;
             if (v === 'code')    return html`<${CodeView}    codes=${codes} retentionText=${retention} setView=${navigate} />`;
-            if (v === 'receive') return html`<${ReceiveView} setView=${navigate} setDownloadData=${setDownload} initialCode=${initialCode} />`;
+            if (v === 'receive') return html`<${ReceiveView} setView=${navigate} setDownloadData=${setDownload} initialCode=${initialCode} clearInitialCode=${() => setInitialCode(null)} />`;
             if (v === 'confirm') return html`<${ConfirmView} setView=${navigate} data=${downloadData} />`;
             return null;
         };
