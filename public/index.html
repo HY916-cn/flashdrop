@@ -178,7 +178,7 @@
                 <img src=${APP_ICON} alt="Flashdrop" className="w-[88px] h-[88px] mb-5 drop-shadow-xl" />
                 <h1 className="text-[32px] font-bold text-slate-800 dark:text-slate-100 tracking-tight mb-2">闪传</h1>
                 <p className="text-slate-600 dark:text-slate-300 font-semibold text-[15px]">简单、快速的文件传输</p>
-                <p className="text-slate-400 dark:text-slate-500 text-sm mt-1">无需登录，即用即走，自动销毁</p>
+                <p className="text-slate-400 dark:text-slate-500 text-sm mt-1">无需登录，即用即走</p>
             </div>
 
             <!-- Buttons -->
@@ -194,7 +194,7 @@
                     </div>
                     <div className="flex-1">
                         <h2 className="text-[15px] font-bold text-slate-800 dark:text-slate-100">发送文件</h2>
-                        <p className="text-slate-400 dark:text-slate-500 text-xs mt-0.5">上传文件 · 获取取件码 · 分享给对方</p>
+                        <p className="text-slate-400 dark:text-slate-500 text-xs mt-0.5">获取取件码以分享给对方</p>
                     </div>
                     <i className="fa-solid fa-chevron-right text-slate-300 dark:text-slate-600 group-hover:text-blue-400 transition-colors text-sm"></i>
                 </button>
@@ -210,7 +210,7 @@
                     </div>
                     <div className="flex-1">
                         <h2 className="text-[15px] font-bold text-slate-800 dark:text-slate-100">接收文件</h2>
-                        <p className="text-slate-400 dark:text-slate-500 text-xs mt-0.5">输入取件码 · 一键下载所有内容</p>
+                        <p className="text-slate-400 dark:text-slate-500 text-xs mt-0.5">输入取件码以下载内容</p>
                     </div>
                     <i className="fa-solid fa-chevron-right text-slate-300 dark:text-slate-600 group-hover:text-emerald-400 transition-colors text-sm"></i>
                 </button>
@@ -317,7 +317,7 @@
                         value=${message}
                         onChange=${e => setMessage(e.target.value)}
                         maxLength="5000"
-                        placeholder="输入要分享的文字内容（可选，支持纯文本）"
+                        placeholder="输入要分享的文字内容"
                         className="w-full bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 dark:text-slate-100 dark:placeholder-slate-600 rounded-2xl p-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all resize-none h-[88px] shrink-0"
                     ></textarea>
 
