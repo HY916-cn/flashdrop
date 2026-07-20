@@ -1,10 +1,18 @@
+<div align="center">
+
 # 闪传 · Flashdrop
 
-极简自托管文件传输——用 2 位取件码，无需账号，即传即走，自动销毁。
+**极简自托管文件传输——用 2 位取件码，无需账号，即传即走，自动销毁。**
 
-发送方上传文件或文字，拿到一个像 `42` 一样简单的取件码；接收方输入取件码即可下载。文件在取走后或到期时自动从服务器销毁，不留痕迹。
+![Node](https://img.shields.io/badge/Node.js-%E2%89%A518-339933?logo=node.js&logoColor=white)
+![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
+![License](https://img.shields.io/badge/License-MIT-blue)
 
-技术栈：Node.js ≥ 18 · Express 4 · React 18 · MIT 协议。
+发送方上传文件或文字，拿到一个像 `42` 一样简单的取件码；接收方输入取件码即可下载。<br/>
+文件在取走后或到期时自动从服务器销毁，不留痕迹。
+
+</div>
 
 ---
 
@@ -268,4 +276,6 @@ pm2 startup
 
 ## License
 
-[MIT](LICENSE) © HaoyuHuang
+本项目基于 [MIT](LICENSE) 协议开源。
+
+2025~2026 ©HaoyuHuang All rights reserved.
