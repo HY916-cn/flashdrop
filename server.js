@@ -63,36 +63,70 @@ const upload = multer({
 const codesDB      = new Map();
 const activeTokens = new Map();
 
+const serializeDB = () => JSON.stringify(
+    [...codesDB.entries()].map(([c, d]) => [c, { ...d, sharedRef: { count: d.sharedRef.count } }]),
+);
+
+// Atomic + coalesced persistence: write to a temp file then rename (so a crash
+// mid-write can never corrupt codes.json), and collapse bursts of saveDB() calls
+// into a single trailing write to avoid concurrent writers racing on the temp file.
+let saving = false, saveQueued = false;
 const saveDB = () => {
-    try {
-        const rows = [...codesDB.entries()].map(([c, d]) => [
-            c, { ...d, sharedRef: { count: d.sharedRef.count } },
-        ]);
-        fs.writeFile(DB_FILE, JSON.stringify(rows), err => {
-            if (err) log('ERROR', 'DB', `写入失败: ${err.message}`);
-        });
-    } catch (e) { log('ERROR', 'DB', `序列化失败: ${e.message}`); }
+    if (saving) { saveQueued = true; return; }
+    saving = true;
+    let payload;
+    try { payload = serializeDB(); }
+    catch (e) { saving = false; return log('ERROR', 'DB', `序列化失败: ${e.message}`); }
+
+    const tmp = `${DB_FILE}.tmp`;
+    const done = (err, stage) => {
+        saving = false;
+        if (err) log('ERROR', 'DB', `${stage}失败: ${err.message}`);
+        if (saveQueued) { saveQueued = false; saveDB(); }
+    };
+    fs.writeFile(tmp, payload, err => {
+        if (err) return done(err, '写入');
+        fs.rename(tmp, DB_FILE, e => done(e, '落盘'));
+    });
 };
 
 const loadDB = () => {
     try {
         if (!fs.existsSync(DB_FILE)) return;
-        const now = Date.now();
-        let ok = 0, skip = 0;
-        for (const [code, d] of JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))) {
-            if (d.expiresAt > now && d.files.every(f => fs.existsSync(f.path))) {
-                const entry = { ...d, sharedRef: { count: d.sharedRef.count } };
-                codesDB.set(code, entry);
-                // Re-register cleanup timer so files are deleted when this code expires
-                setTimeout(() => {
-                    codesDB.delete(code);
-                    entry.files.forEach(f => { try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {} });
-                    saveDB();
-                    log('INFO', 'EXPIRE', `[${code}] 恢复码到期，已清理`);
-                }, d.expiresAt - now);
-                ok++;
-            } else { skip++; }
+        const now  = Date.now();
+        const rows = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+
+        // Keep only rows that are still valid: not expired and with files intact.
+        const valid = rows.filter(([, d]) =>
+            d.expiresAt > now && d.files.every(f => fs.existsSync(f.path)));
+
+        // Group surviving codes back into their upload batch. Codes issued together
+        // must share ONE reference counter and one expiry timer — a relationship JSON
+        // can't encode — so we rebuild it here. The count is reset to the number of
+        // codes that actually survived, which also releases references that were held
+        // by download tokens lost on restart (tokens are in-memory only).
+        const batches = new Map();
+        for (const [code, d] of valid) {
+            const key = d.bid || `solo:${code}`; // pre-batch-id data: each code is its own batch
+            const batch = batches.get(key)
+                || batches.set(key, { data: d, codes: [] }).get(key);
+            batch.codes.push(code);
         }
+
+        let ok = 0;
+        for (const { data, codes } of batches.values()) {
+            // One entry object shared by every code in the batch → one sharedRef.
+            const entry = { ...data, sharedRef: { count: codes.length } };
+            codes.forEach(c => codesDB.set(c, entry));
+            setTimeout(() => {
+                codes.forEach(c => codesDB.delete(c));
+                entry.files.forEach(f => { try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {} });
+                saveDB();
+                log('INFO', 'EXPIRE', `[${codes.join(', ')}] 恢复批次到期，已清理`);
+            }, data.expiresAt - now);
+            ok += codes.length;
+        }
+        const skip = rows.length - ok;
         if (ok || skip) log('INFO', 'SYSTEM', `恢复 ${ok} 个取件码，跳过 ${skip} 条过期记录`);
     } catch (e) { log('WARN', 'SYSTEM', `DB 恢复失败: ${e.message}`); }
 };
@@ -218,7 +252,8 @@ app.post('/api/upload', rateLimit(CFG.RL_UPLOAD, CFG.RL_WINDOW), (req, res) => {
             }));
             const sharedRef = { count: quantity };
             const expiresAt = Date.now() + lifeTime;
-            codes.forEach(c => codesDB.set(c, { files: fileData, message, expiresAt, sharedRef }));
+            const bid       = uuidv4(); // batch id: lets loadDB regroup shared codes after a restart
+            codes.forEach(c => codesDB.set(c, { files: fileData, message, expiresAt, sharedRef, bid }));
             saveDB();
             log('INFO', 'UPLOAD', `IP ${ip} | [${codes.join(', ')}] | ${retKey} | ${files.length} 文件`);
 
@@ -319,4 +354,16 @@ app.get('/:code([0-9]{2})', (req, res) =>
 
 app.get('*', (req, res) => res.redirect('/'));
 
-app.listen(PORT, () => log('INFO', 'SYSTEM', `Flashdrop 已就绪 | 端口 ${PORT}`));
+const server = app.listen(PORT, () => log('INFO', 'SYSTEM', `Flashdrop 已就绪 | 端口 ${PORT}`));
+
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+// Flush the DB synchronously so nothing is lost when the process is stopped.
+const shutdown = (sig) => {
+    log('INFO', 'SYSTEM', `${sig} 收到，正在保存并退出`);
+    try { fs.writeFileSync(DB_FILE, serializeDB()); }
+    catch (e) { log('ERROR', 'DB', `退出保存失败: ${e.message}`); }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref(); // don't hang on lingering connections
+};
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

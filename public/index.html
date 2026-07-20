@@ -670,9 +670,9 @@
         const destroyRef = useRef(false);
         const autoRef    = useRef(false);
 
-        if (!data) return null;
-
-        const allDone = data.files?.length > 0 && data.files.every((_, i) => downloadedSet.has(i));
+        // NOTE: every hook must run on every render (Rules of Hooks), so the
+        // `!data` guard lives just above the JSX return, never before a hook.
+        const allDone = data?.files?.length > 0 && data.files.every((_, i) => downloadedSet.has(i));
 
         useEffect(() => {
             const destroy = () => {
@@ -741,6 +741,8 @@
                 if (i < data.files.length - 1) await new Promise(r => setTimeout(r, 400));
             }
         };
+
+        if (!data) return null;
 
         return html`
             <div className="absolute inset-0 flex flex-col">
