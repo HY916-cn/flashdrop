@@ -4,10 +4,18 @@
 
 **极简自托管文件传输——用 2 位取件码，无需账号，即传即走，自动销毁。**
 
-![Node](https://img.shields.io/badge/Node.js-%E2%89%A518-339933?logo=node.js&logoColor=white)
-![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
-![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
-![License](https://img.shields.io/badge/License-MIT-blue)
+[![Node](https://img.shields.io/badge/Node.js-%E2%89%A518-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)](https://expressjs.com/)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![HTM](https://img.shields.io/badge/HTM-no%20build-EC4899?logo=javascript&logoColor=white)](https://github.com/developit/htm)
+[![Multer](https://img.shields.io/badge/Multer-uploads-FF6C37?logo=node.js&logoColor=white)](https://github.com/expressjs/multer)
+[![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
+
+[![Stars](https://img.shields.io/github/stars/HY916-cn/flashdrop?logo=github&label=Stars)](https://github.com/HY916-cn/flashdrop/stargazers)
+[![Forks](https://img.shields.io/github/forks/HY916-cn/flashdrop?logo=github&label=Forks)](https://github.com/HY916-cn/flashdrop/network/members)
+[![Last Commit](https://img.shields.io/github/last-commit/HY916-cn/flashdrop?logo=git&logoColor=white)](https://github.com/HY916-cn/flashdrop/commits)
+[![Repo Size](https://img.shields.io/github/repo-size/HY916-cn/flashdrop)](https://github.com/HY916-cn/flashdrop)
+[![Issues](https://img.shields.io/github/issues/HY916-cn/flashdrop?logo=github&label=Issues)](https://github.com/HY916-cn/flashdrop/issues)
 
 发送方上传文件或文字，拿到一个像 `42` 一样简单的取件码；接收方输入取件码即可下载。<br/>
 文件在取走后或到期时自动从服务器销毁，不留痕迹。
